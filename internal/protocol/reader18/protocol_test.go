@@ -165,3 +165,18 @@ func TestParseSingleInventoryResult(t *testing.T) {
 		t.Fatalf("unexpected epc first byte: got 0x%02X", result.EPC[0])
 	}
 }
+
+func TestParseSingleInventoryResultStatusSuccess(t *testing.T) {
+	f := Frame{
+		Command: CmdInventorySingle,
+		Status:  StatusSuccess,
+		Data:    []byte{0x01, 0x01, 0x0C, 0x30, 0x34, 0x25, 0x7B, 0xF7, 0x19, 0x4E, 0x40, 0x00, 0x00, 0x00, 0x42},
+	}
+	result, err := ParseSingleInventoryResult(f)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.TagCount != 1 {
+		t.Fatalf("unexpected tag count: got %d", result.TagCount)
+	}
+}

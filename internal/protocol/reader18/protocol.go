@@ -256,7 +256,7 @@ func ParseSingleInventoryResult(frame Frame) (SingleInventoryResult, error) {
 	if frame.Command != CmdInventorySingle {
 		return SingleInventoryResult{}, fmt.Errorf("not single-inventory frame")
 	}
-	if frame.Status != StatusNoTag {
+	if frame.Status != StatusNoTag && frame.Status != StatusSuccess {
 		return SingleInventoryResult{}, fmt.Errorf("single-inventory status 0x%02X", frame.Status)
 	}
 	if len(frame.Data) < 3 {

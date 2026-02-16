@@ -16,6 +16,8 @@ import (
 	"new_era_go/internal/regions"
 )
 
+const autoFreqCycleEnabled = false
+
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -64,8 +66,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		m.inventoryRounds++
-		cmds := make([]tea.Cmd, 0, 4)
-		if len(inventoryFrequencyWindows) > 0 && m.inventoryTagTotal == 0 && (m.inventoryRounds == 1 || m.inventoryRounds%80 == 0) {
+		cmds := make([]tea.Cmd, 0, 5)
+		if autoFreqCycleEnabled && len(inventoryFrequencyWindows) > 0 && m.inventoryTagTotal == 0 && (m.inventoryRounds == 1 || m.inventoryRounds%80 == 0) {
 			window := inventoryFrequencyWindows[m.inventoryFreqIdx%len(inventoryFrequencyWindows)]
 			m.inventoryFreqIdx++
 			cmds = append(cmds, sendNamedCmdSilent(m.reader, "cfg-freq-cycle", reader18.SetFrequencyRangeCommand(m.inventoryAddress, window.High, window.Low)))
@@ -89,6 +91,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			sendNamedCmdSilent(m.reader, "inventory-g2", cmdInventory),
 			inventoryTickCmd(m.effectiveInventoryInterval()),
 		)
+		// Some firmwares return only tag count on cmd 0x01; periodic single inventory keeps EPC capture reliable.
+		if m.inventoryRounds%6 == 0 {
+			cmds = append(cmds, sendNamedCmdSilent(m.reader, "inventory-single", reader18.InventorySingleTagCommand(m.inventoryAddress)))
+		}
 		return m, tea.Batch(cmds...)
 
 	case probeTimeoutMsg:
@@ -238,8 +244,7 @@ func (m Model) onConnectFinished(msg connectFinishedMsg) (tea.Model, tea.Cmd) {
 			sendNamedCmdSilent(m.reader, "cfg-work-mode", reader18.SetWorkModeCommand(m.inventoryAddress, []byte{0x00})),
 			sendNamedCmdSilent(m.reader, "cfg-scan-time", reader18.SetScanTimeCommand(m.inventoryAddress, m.inventoryScanTime)),
 			sendNamedCmdSilent(m.reader, "cfg-ant-mask", reader18.SetAntennaMuxCommand(m.inventoryAddress, m.inventoryAntMask)),
-			sendNamedCmdSilent(m.reader, "cfg-power", reader18.SetOutputPowerCommand(m.inventoryAddress, 0x21)),
-			sendNamedCmdSilent(m.reader, "cfg-freq", reader18.SetFrequencyRangeCommand(m.inventoryAddress, 0x3E, 0x28)),
+			sendNamedCmdSilent(m.reader, "cfg-power", reader18.SetOutputPowerCommand(m.inventoryAddress, 0x1E)),
 			inventoryTickCmd(m.effectiveInventoryInterval()),
 		)
 	case 2:
@@ -351,6 +356,17 @@ func (m *Model) handleProtocolFrame(frame reader18.Frame) {
 			} else if m.inventoryRunning && m.inventoryRounds%12 == 0 && m.lastTagEPC != "" {
 				if m.activeScreen == screenControl {
 					m.status = fmt.Sprintf("Tag seen again: %s", trimText(m.lastTagEPC, 28))
+				}
+			}
+			return
+		}
+		if frame.Status == reader18.StatusSuccess {
+			if count, err := reader18.InventoryTagCount(frame); err == nil && count > 0 {
+				if m.activeScreen == screenControl && m.inventoryRounds%6 == 0 {
+					m.status = fmt.Sprintf("Reader reports %d tag(s), waiting EPC frame...", count)
+				}
+				if m.inventoryRounds%30 == 0 {
+					m.pushLog(fmt.Sprintf("inventory count-only response: %d tag(s)", count))
 				}
 			}
 			return
@@ -857,8 +873,7 @@ func (m Model) runControlAction(index int) (tea.Model, tea.Cmd) {
 			sendNamedCmdSilent(m.reader, "cfg-work-mode", reader18.SetWorkModeCommand(m.inventoryAddress, []byte{0x00})),
 			sendNamedCmdSilent(m.reader, "cfg-scan-time", reader18.SetScanTimeCommand(m.inventoryAddress, m.inventoryScanTime)),
 			sendNamedCmdSilent(m.reader, "cfg-ant-mask", reader18.SetAntennaMuxCommand(m.inventoryAddress, m.inventoryAntMask)),
-			sendNamedCmdSilent(m.reader, "cfg-power", reader18.SetOutputPowerCommand(m.inventoryAddress, 0x21)),
-			sendNamedCmdSilent(m.reader, "cfg-freq", reader18.SetFrequencyRangeCommand(m.inventoryAddress, 0x3E, 0x28)),
+			sendNamedCmdSilent(m.reader, "cfg-power", reader18.SetOutputPowerCommand(m.inventoryAddress, 0x1E)),
 			inventoryTickCmd(m.effectiveInventoryInterval()),
 		)
 
