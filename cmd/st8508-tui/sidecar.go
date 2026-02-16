@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -70,23 +71,107 @@ func startBotSidecar() (func(), error) {
 
 func buildBotCommand() (*exec.Cmd, error) {
 	if raw := strings.TrimSpace(os.Getenv("BOT_AUTOSTART_CMD")); raw != "" {
-		return exec.Command("sh", "-lc", raw), nil
-	}
-
-	if info, err := os.Stat("./rfid-go-bot"); err == nil && info.Mode().Perm()&0o111 != 0 {
-		return exec.Command("./rfid-go-bot"), nil
-	}
-
-	if _, err := os.Stat("./cmd/rfid-go-bot"); err == nil {
-		if _, lookErr := exec.LookPath("go"); lookErr != nil {
-			return nil, fmt.Errorf("BOT_AUTOSTART=1 but go binary not found in PATH")
+		cmd := exec.Command("sh", "-lc", raw)
+		if wd, err := os.Getwd(); err == nil {
+			cmd.Dir = wd
 		}
-		return exec.Command("go", "run", "./cmd/rfid-go-bot"), nil
+		return cmd, nil
+	}
+
+	roots := candidateBotRoots()
+	for _, root := range roots {
+		binPath := filepath.Join(root, "rfid-go-bot")
+		if info, err := os.Stat(binPath); err == nil && info.Mode().Perm()&0o111 != 0 {
+			cmd := exec.Command(binPath)
+			cmd.Dir = root
+			return cmd, nil
+		}
+
+		mainPath := filepath.Join(root, "cmd", "rfid-go-bot", "main.go")
+		if _, err := os.Stat(mainPath); err == nil {
+			goBin, lookErr := exec.LookPath("go")
+			if lookErr != nil {
+				return nil, fmt.Errorf(
+					"BOT_AUTOSTART=1 but go binary not found in PATH (root=%s)", root,
+				)
+			}
+			cmd := exec.Command(goBin, "run", "./cmd/rfid-go-bot")
+			cmd.Dir = root
+			return cmd, nil
+		}
 	}
 
 	return nil, errors.New(
-		"BOT_AUTOSTART=1 but bot entrypoint not found. Expected ./cmd/rfid-go-bot or ./rfid-go-bot binary; set BOT_AUTOSTART_CMD or BOT_AUTOSTART=0",
+		"BOT_AUTOSTART=1 but bot entrypoint not found in candidate roots (" +
+			strings.Join(roots, ", ") +
+			"). Expected cmd/rfid-go-bot/main.go or rfid-go-bot binary; set BOT_AUTOSTART_CMD or BOT_AUTOSTART=0",
 	)
+}
+
+func candidateBotRoots() []string {
+	seen := map[string]struct{}{}
+	roots := make([]string, 0, 12)
+
+	add := func(path string) {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			return
+		}
+		abs, err := filepath.Abs(path)
+		if err != nil {
+			return
+		}
+		abs = filepath.Clean(abs)
+		info, err := os.Stat(abs)
+		if err != nil || !info.IsDir() {
+			return
+		}
+		if _, ok := seen[abs]; ok {
+			return
+		}
+		seen[abs] = struct{}{}
+		roots = append(roots, abs)
+	}
+
+	addWithParents := func(path string, depth int) {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			return
+		}
+		cur := path
+		for i := 0; i < depth; i++ {
+			add(cur)
+			parent := filepath.Dir(cur)
+			if parent == cur {
+				break
+			}
+			cur = parent
+		}
+	}
+
+	if wd, err := os.Getwd(); err == nil {
+		addWithParents(wd, 6)
+	}
+
+	if exe, err := os.Executable(); err == nil {
+		addWithParents(filepath.Dir(exe), 6)
+	}
+
+	if envPath := strings.TrimSpace(os.Getenv("BOT_ENV_FILE")); envPath != "" {
+		if !filepath.IsAbs(envPath) {
+			if wd, err := os.Getwd(); err == nil {
+				envPath = filepath.Join(wd, envPath)
+			}
+		}
+		addWithParents(filepath.Dir(envPath), 6)
+	}
+
+	if override := strings.TrimSpace(os.Getenv("BOT_AUTOSTART_ROOT")); override != "" {
+		addWithParents(override, 2)
+	}
+
+	sort.Strings(roots)
+	return roots
 }
 
 func waitForBot(socketPath string, waitCh <-chan error, timeout time.Duration) error {

@@ -89,6 +89,7 @@ Optional tuning:
 - `BOT_SYNC_SOURCE` (default `st8508-tui`)
 - `BOT_AUTOSTART` (`1` default, set `0` to disable bot sidecar autostart)
 - `BOT_AUTOSTART_CMD` (optional custom bot start command, e.g. `go run ./cmd/rfid-go-bot`)
+- `BOT_AUTOSTART_ROOT` (optional root override where sidecar searches bot paths)
 - `BOT_LOG_DIR` (default `logs`)
 
 Optional diagnostics:
