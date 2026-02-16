@@ -13,8 +13,10 @@ This project is a modular Go terminal app for ST-8508 style LAN RFID readers.
 - Discovery now verifies reader protocol handshake before prioritizing candidates.
 - Post-connect probe timeout detects wrong endpoints and auto-disconnects.
 - Startup quick-connect flow (scan + auto-connect to best candidate).
+- Startup auto-read flow (scan + auto-connect + start reading loop).
 - Manual candidate selection and reconnect from Device List.
-- Start/Stop reading from Control menu with inventory polling (`0x01`).
+- Start/Stop reading from Control menu with mixed polling (`0x0F` + `0x01`).
+- Adaptive frequency window cycling during read when no tag is detected.
 - Auto address detection while reading (`0x00` and `0xFF` fallback).
 - Reader protocol parser (`Reader18`) with CRC16-MCRF4XX frame handling.
 - Tag read counters (`rounds`, `total-tags`) shown live in TUI.
