@@ -10,7 +10,7 @@ logs/
 # Build outputs
 bin/
 dist/
-rfid-go-bot
+/rfid-go-bot
 
 # Archives
 *.tar
