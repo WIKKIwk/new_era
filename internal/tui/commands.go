@@ -63,6 +63,18 @@ func sendNamedCmd(client *reader.Client, name string, payload []byte) tea.Cmd {
 	}
 }
 
+func sendNamedCmdSilent(client *reader.Client, name string, payload []byte) tea.Cmd {
+	data := make([]byte, len(payload))
+	copy(data, payload)
+	return func() tea.Msg {
+		err := client.SendRaw(data, 2*time.Second)
+		if err != nil {
+			return commandSentMsg{Name: name, Sent: len(data), Err: err}
+		}
+		return nil
+	}
+}
+
 func inventoryTickCmd(delay time.Duration) tea.Cmd {
 	if delay <= 0 {
 		return func() tea.Msg { return inventoryTickMsg{} }

@@ -41,7 +41,7 @@ type ScanOptions struct {
 func DefaultOptions() ScanOptions {
 	return ScanOptions{
 		Ports: []int{
-			2022, 6000, 4001, 10001, 5000,
+			2022, 27011, 6000, 4001, 10001, 5000,
 		},
 		Timeout:               180 * time.Millisecond,
 		Concurrency:           96,
@@ -230,11 +230,19 @@ func probeTarget(ctx context.Context, host netip.Addr, port int, timeout time.Du
 
 func probeReaderProtocol(conn net.Conn, timeout time.Duration) (bool, byte, string) {
 	try := []struct {
-		name string
-		cmd  func(addr byte) []byte
+		name   string
+		expect byte
+		cmd    func(addr byte) []byte
 	}{
-		{name: "get-info", cmd: reader18.GetReaderInfoCommand},
-		{name: "inventory", cmd: reader18.InventorySingleCommand},
+		{name: "get-info", expect: reader18.CmdGetReaderInfo, cmd: reader18.GetReaderInfoCommand},
+		{
+			name:   "inventory-g2",
+			expect: reader18.CmdInventory,
+			cmd: func(addr byte) []byte {
+				return reader18.InventoryG2Command(addr, 0x04, 0x01, 0x00, 0x00, 0x00, 0x80, 0x0A)
+			},
+		},
+		{name: "inventory-legacy", expect: reader18.CmdInventory, cmd: reader18.InventorySingleCommand},
 	}
 	addrs := []byte{reader18.DefaultReaderAddress, reader18.BroadcastReaderAddress}
 
@@ -243,15 +251,8 @@ func probeReaderProtocol(conn net.Conn, timeout time.Duration) (bool, byte, stri
 			payload := probe.cmd(addr)
 			frames, _ := sendProbeAndReadFrames(conn, payload, timeout)
 			for _, frame := range frames {
-				switch probe.name {
-				case "get-info":
-					if frame.Command == reader18.CmdGetReaderInfo {
-						return true, frame.Address, "reader18/" + probe.name
-					}
-				case "inventory":
-					if frame.Command == reader18.CmdInventory {
-						return true, frame.Address, "reader18/" + probe.name
-					}
+				if frame.Command == probe.expect {
+					return true, frame.Address, "reader18/" + probe.name
 				}
 			}
 		}
@@ -338,7 +339,7 @@ func sanitizeASCII(in string) string {
 
 func portScore(port int) int {
 	switch port {
-	case 2022, 4001, 5000, 6000, 7000, 10001:
+	case 2022, 27011, 4001, 5000, 6000, 7000, 10001:
 		return 55
 	case 23:
 		return 30

@@ -55,6 +55,22 @@ func TestBuildInventoryCommandWithPayload(t *testing.T) {
 	}
 }
 
+func TestBuildInventoryG2CommandNoTID(t *testing.T) {
+	got := InventoryG2Command(0x00, 0x04, 0x01, 0x00, 0x00, 0x00, 0x80, 0x0A)
+	want := []byte{0x09, 0x00, 0x01, 0x04, 0x01, 0x00, 0x80, 0x0A, 0x99, 0xC6}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("inventory G2 no-TID mismatch: got %X want %X", got, want)
+	}
+}
+
+func TestBuildInventoryG2CommandWithTID(t *testing.T) {
+	got := InventoryG2Command(0x00, 0x04, 0x01, 0x00, 0x06, 0x00, 0x80, 0x0A)
+	want := []byte{0x0B, 0x00, 0x01, 0x04, 0x01, 0x00, 0x06, 0x00, 0x80, 0x0A, 0x29, 0x03}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("inventory G2 with-TID mismatch: got %X want %X", got, want)
+	}
+}
+
 func TestParseFrames(t *testing.T) {
 	frame1 := buildResponseFrame(0x00, CmdInventory, StatusSuccess, []byte{0x01, 0xAA})
 	frame2 := buildResponseFrame(0x00, CmdGetReaderInfo, StatusSuccess, []byte{0x10})
@@ -95,6 +111,34 @@ func TestInventoryTagCount(t *testing.T) {
 	}
 	if count != 3 {
 		t.Fatalf("unexpected tag count: got %d want 3", count)
+	}
+}
+
+func TestParseInventoryG2Tags(t *testing.T) {
+	f := Frame{
+		Command: CmdInventory,
+		Status:  StatusNoTag,
+		Data: []byte{
+			0x01, 0x01, 0x0C,
+			0x30, 0x34, 0x25, 0x7B, 0xF7, 0x19, 0x4E, 0x40, 0x00, 0x00, 0x00, 0x42,
+			0x5A,
+		},
+	}
+	tags, err := ParseInventoryG2Tags(f)
+	if err != nil {
+		t.Fatalf("unexpected parse error: %v", err)
+	}
+	if len(tags) != 1 {
+		t.Fatalf("expected 1 tag, got %d", len(tags))
+	}
+	if tags[0].Antenna != 1 {
+		t.Fatalf("unexpected antenna: %d", tags[0].Antenna)
+	}
+	if len(tags[0].EPC) != 12 {
+		t.Fatalf("unexpected epc len: %d", len(tags[0].EPC))
+	}
+	if tags[0].RSSI != 0x5A {
+		t.Fatalf("unexpected rssi: %d", tags[0].RSSI)
 	}
 }
 

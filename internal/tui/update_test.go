@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"new_era_go/internal/discovery"
+	reader18 "new_era_go/internal/protocol/reader18"
 	"new_era_go/internal/reader"
 )
 
@@ -87,5 +88,48 @@ func TestOnScanFinishedClearsPendingActionWhenNoCandidates(t *testing.T) {
 	}
 	if nm.pendingConnect {
 		t.Fatal("expected pendingConnect=false")
+	}
+}
+
+func TestSingleInventoryCountsUniqueTagOnlyOnce(t *testing.T) {
+	m := NewModel()
+	m.inventoryRunning = true
+
+	frame := reader18.Frame{
+		Command: reader18.CmdInventorySingle,
+		Status:  reader18.StatusNoTag,
+		Address: 0x00,
+		Data: []byte{
+			0x01, 0x01, 0x0C,
+			0x30, 0x34, 0x25, 0x7B, 0xF7, 0x19,
+			0x4E, 0x40, 0x00, 0x00, 0x00, 0x42,
+		},
+	}
+
+	m.handleProtocolFrame(frame)
+	m.handleProtocolFrame(frame)
+
+	if m.inventoryTagTotal != 1 {
+		t.Fatalf("expected unique tag total 1, got %d", m.inventoryTagTotal)
+	}
+	if len(m.seenTagEPC) != 1 {
+		t.Fatalf("expected seen EPC size 1, got %d", len(m.seenTagEPC))
+	}
+}
+
+func TestLegacyInventoryDoesNotInflateUniqueCounter(t *testing.T) {
+	m := NewModel()
+	m.inventoryRunning = true
+	m.inventoryTagTotal = 0
+
+	frame := reader18.Frame{
+		Command: reader18.CmdInventory,
+		Status:  reader18.StatusNoTag,
+		Data:    []byte{0x01, 0x09},
+	}
+	m.handleProtocolFrame(frame)
+
+	if m.inventoryTagTotal != 0 {
+		t.Fatalf("expected unique tag total unchanged, got %d", m.inventoryTagTotal)
 	}
 }

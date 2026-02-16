@@ -9,13 +9,13 @@ This project is a modular Go terminal app for ST-8508 style LAN RFID readers.
 - Lightweight rendering: only current page is drawn, logs are throttled/capped.
 - Faster startup feel: scanner profile tuned to reduce LAN probe load.
 - LAN auto-discovery of possible reader endpoints (no manual IP typing required).
-- Discovery default TCP ports include `2022`, `6000`, `4001`, `10001`, `5000`.
+- Discovery default TCP ports include `2022`, `27011`, `6000`, `4001`, `10001`, `5000`.
 - Discovery now verifies reader protocol handshake before prioritizing candidates.
 - Post-connect probe timeout detects wrong endpoints and auto-disconnects.
 - Startup quick-connect flow (scan + auto-connect to best candidate).
 - Startup auto-read flow (scan + auto-connect + start reading loop).
 - Manual candidate selection and reconnect from Device List.
-- Start/Stop reading from Control menu with mixed polling (`0x0F` + `0x01`).
+- Start/Stop reading from Control menu with SDK-style `Inventory_G2` (`0x01`).
 - Adaptive frequency window cycling during read when no tag is detected.
 - Auto address detection while reading (`0x00` and `0xFF` fallback).
 - Reader protocol parser (`Reader18`) with CRC16-MCRF4XX frame handling.

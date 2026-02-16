@@ -15,6 +15,7 @@ const (
 	CmdGetWorkMode         byte = 0x36
 	CmdAcoustoOptic        byte = 0x33
 	CmdSetOutputPower      byte = 0x2F
+	CmdSetAntennaMux       byte = 0x3F
 	StatusSuccess          byte = 0x00
 	StatusNoTag            byte = 0x01
 	StatusCmdError         byte = 0xFE
@@ -123,9 +124,19 @@ func InventorySingleCommand(address byte) []byte {
 	return BuildCommand(address, CmdInventory, nil)
 }
 
-// InventoryCommand returns inventory command with TID address/length payload.
+// InventoryCommand returns legacy inventory command with TID address/length payload.
 func InventoryCommand(address, tidAddr, tidLen byte) []byte {
 	return BuildCommand(address, CmdInventory, []byte{tidAddr, tidLen})
+}
+
+// InventoryG2Command builds SDK-compatible inventory command (0x01).
+// If tidLen is zero, payload is: Q,Session,Target,Antenna,ScanTime.
+// Otherwise payload is: Q,Session,TIDAddr,TIDLen,Target,Antenna,ScanTime.
+func InventoryG2Command(address, qValue, session, tidAddr, tidLen, target, antenna, scanTime byte) []byte {
+	if tidLen == 0 {
+		return BuildCommand(address, CmdInventory, []byte{qValue, session, target, antenna, scanTime})
+	}
+	return BuildCommand(address, CmdInventory, []byte{qValue, session, tidAddr, tidLen, target, antenna, scanTime})
 }
 
 // InventorySingleTagCommand sends single inventory command (0x0F).
@@ -158,6 +169,11 @@ func SetWorkModeCommand(address byte, payload []byte) []byte {
 	return BuildCommand(address, CmdSetWorkMode, payload)
 }
 
+// SetAntennaMuxCommand sets active antenna bitmask.
+func SetAntennaMuxCommand(address, antCfg byte) []byte {
+	return BuildCommand(address, CmdSetAntennaMux, []byte{antCfg})
+}
+
 // InventoryTagCount extracts tag count from inventory response payload.
 func InventoryTagCount(frame Frame) (int, error) {
 	if frame.Command != CmdInventory {
@@ -179,6 +195,59 @@ type SingleInventoryResult struct {
 	Antenna  byte
 	TagCount int
 	EPC      []byte
+}
+
+// InventoryG2Tag is one parsed tag from inventory command 0x01 response.
+type InventoryG2Tag struct {
+	Antenna int
+	EPC     []byte
+	RSSI    int
+}
+
+// ParseInventoryG2Tags parses inventory payload from command 0x01.
+// Data format: AntMask(1), TagNum(1), repeated [EpcLen(1), EPC(n), RSSI(1)].
+func ParseInventoryG2Tags(frame Frame) ([]InventoryG2Tag, error) {
+	if frame.Command != CmdInventory {
+		return nil, fmt.Errorf("not inventory frame")
+	}
+	if len(frame.Data) < 2 {
+		return nil, nil
+	}
+
+	tagNum := int(frame.Data[1])
+	if tagNum <= 0 {
+		return nil, nil
+	}
+
+	antenna := antennaIDFromMask(frame.Data[0])
+	cursor := 2
+	tags := make([]InventoryG2Tag, 0, tagNum)
+	for i := 0; i < tagNum; i++ {
+		if cursor >= len(frame.Data) {
+			return nil, fmt.Errorf("inventory payload truncated at tag %d", i)
+		}
+		epcLen := int(frame.Data[cursor])
+		cursor++
+		if epcLen <= 0 || cursor+epcLen > len(frame.Data) {
+			return nil, fmt.Errorf("inventory invalid epc len at tag %d", i)
+		}
+
+		epc := make([]byte, epcLen)
+		copy(epc, frame.Data[cursor:cursor+epcLen])
+		cursor += epcLen
+		if cursor >= len(frame.Data) {
+			return nil, fmt.Errorf("inventory missing rssi at tag %d", i)
+		}
+		rssi := int(frame.Data[cursor])
+		cursor++
+
+		tags = append(tags, InventoryG2Tag{
+			Antenna: antenna,
+			EPC:     epc,
+			RSSI:    rssi,
+		})
+	}
+	return tags, nil
 }
 
 // ParseSingleInventoryResult decodes single inventory payload.
@@ -208,6 +277,29 @@ func ParseSingleInventoryResult(frame Frame) (SingleInventoryResult, error) {
 		TagCount: count,
 		EPC:      epc,
 	}, nil
+}
+
+func antennaIDFromMask(mask byte) int {
+	switch mask {
+	case 1:
+		return 1
+	case 2:
+		return 2
+	case 4:
+		return 3
+	case 8:
+		return 4
+	case 16:
+		return 5
+	case 32:
+		return 6
+	case 64:
+		return 7
+	case 128:
+		return 8
+	default:
+		return int(mask) + 1
+	}
 }
 
 // crc-16-mcrf4xx (poly 0x8408, init 0xFFFF, refin/refout true).

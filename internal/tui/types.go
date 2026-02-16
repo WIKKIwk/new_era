@@ -15,6 +15,7 @@ const (
 	screenHome screen = iota
 	screenDevices
 	screenControl
+	screenInventory
 	screenRegions
 	screenLogs
 	screenHelp
@@ -47,6 +48,7 @@ var homeMenu = []menuItem{
 	{Label: "Quick Connect", Desc: "Scan LAN and connect to best reader"},
 	{Label: "Devices", Desc: "Browse discovered reader endpoints"},
 	{Label: "Control", Desc: "Start/stop reading and run commands"},
+	{Label: "Inventory Tune", Desc: "Q/session/target/antenna performance settings"},
 	{Label: "Regions", Desc: "Choose RF region preset"},
 	{Label: "Logs", Desc: "Inspect recent events"},
 	{Label: "Help", Desc: "Show key guide"},
@@ -60,6 +62,7 @@ var controlMenu = []menuItem{
 	{Label: "Disconnect", Desc: "Close TCP connection"},
 	{Label: "Rescan + Quick Connect", Desc: "Find and reconnect"},
 	{Label: "Clear Logs", Desc: "Keep only new events"},
+	{Label: "Inventory Tune", Desc: "Open inventory parameter page"},
 	{Label: "Back To Home", Desc: "Return to home page"},
 }
 
@@ -107,6 +110,7 @@ type Model struct {
 	homeIndex      int
 	deviceIndex    int
 	controlIndex   int
+	inventoryIndex int
 	regionIndex    int
 	regionCursor   int
 	logScroll      int
@@ -132,10 +136,23 @@ type Model struct {
 	inventoryInterval time.Duration
 	inventoryAddress  byte
 	inventoryAutoAddr bool
+	inventoryQValue   byte
+	inventorySession  byte
+	inventoryTarget   byte
+	inventoryAntenna  byte
+	inventoryAntMask  byte
+	inventoryScanTime byte
+	inventoryNoTagAB  int
+	inventoryNoTagHit int
+	showPhaseFreq     bool
+	lastTagAntenna    int
+	lastTagRSSI       int
 	inventoryRounds   int
 	inventoryTagTotal int
 	inventoryFreqIdx  int
+	inventoryAntIdx   int
 	lastTagEPC        string
+	seenTagEPC        map[string]struct{}
 	protocolBuffer    []byte
 	lastRawLogAt      time.Time
 	awaitingProbe     bool

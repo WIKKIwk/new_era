@@ -29,6 +29,7 @@ func NewModel() Model {
 		homeIndex:         0,
 		deviceIndex:       0,
 		controlIndex:      0,
+		inventoryIndex:    0,
 		regionIndex:       regionIdx,
 		regionCursor:      regionIdx,
 		logScroll:         0,
@@ -46,13 +47,26 @@ func NewModel() Model {
 		txBytes:           0,
 		lastRX:            "",
 		inventoryRunning:  false,
-		inventoryInterval: 220 * time.Millisecond,
+		inventoryInterval: 60 * time.Millisecond,
 		inventoryAddress:  reader18.DefaultReaderAddress,
 		inventoryAutoAddr: true,
+		inventoryQValue:   0x04,
+		inventorySession:  0x01,
+		inventoryTarget:   0x00,
+		inventoryAntenna:  0x80,
+		inventoryAntMask:  0x01,
+		inventoryScanTime: 0x01,
+		inventoryNoTagAB:  4,
+		inventoryNoTagHit: 0,
+		showPhaseFreq:     false,
+		lastTagAntenna:    0,
+		lastTagRSSI:       0,
 		inventoryRounds:   0,
 		inventoryTagTotal: 0,
 		inventoryFreqIdx:  0,
+		inventoryAntIdx:   0,
 		lastTagEPC:        "",
+		seenTagEPC:        make(map[string]struct{}),
 		protocolBuffer:    nil,
 		lastRawLogAt:      time.Time{},
 		awaitingProbe:     false,
@@ -63,4 +77,15 @@ func NewModel() Model {
 
 func (m Model) Init() tea.Cmd {
 	return runScanCmd(m.scanOptions)
+}
+
+func (m Model) effectiveInventoryInterval() time.Duration {
+	minDelay := time.Duration(m.inventoryScanTime) * 100 * time.Millisecond
+	if minDelay < 40*time.Millisecond {
+		minDelay = 40 * time.Millisecond
+	}
+	if m.inventoryInterval > minDelay {
+		return m.inventoryInterval
+	}
+	return minDelay
 }

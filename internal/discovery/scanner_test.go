@@ -35,3 +35,10 @@ func TestDefaultOptionsIncludesPort2022(t *testing.T) {
 		t.Fatalf("expected default ports to contain 2022, got %v", opts.Ports)
 	}
 }
+
+func TestDefaultOptionsIncludesPort27011(t *testing.T) {
+	opts := DefaultOptions()
+	if !slices.Contains(opts.Ports, 27011) {
+		t.Fatalf("expected default ports to contain 27011, got %v", opts.Ports)
+	}
+}

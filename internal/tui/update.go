@@ -65,18 +65,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		m.inventoryRounds++
 		cmds := make([]tea.Cmd, 0, 4)
-		if len(inventoryFrequencyWindows) > 0 && m.inventoryTagTotal == 0 && (m.inventoryRounds == 1 || m.inventoryRounds%30 == 0) {
+		if len(inventoryFrequencyWindows) > 0 && m.inventoryTagTotal == 0 && (m.inventoryRounds == 1 || m.inventoryRounds%80 == 0) {
 			window := inventoryFrequencyWindows[m.inventoryFreqIdx%len(inventoryFrequencyWindows)]
 			m.inventoryFreqIdx++
-			cmds = append(cmds, sendNamedCmd(m.reader, "cfg-freq-cycle", reader18.SetFrequencyRangeCommand(m.inventoryAddress, window.High, window.Low)))
+			cmds = append(cmds, sendNamedCmdSilent(m.reader, "cfg-freq-cycle", reader18.SetFrequencyRangeCommand(m.inventoryAddress, window.High, window.Low)))
 		}
 
-		cmdSingle := reader18.InventorySingleTagCommand(m.inventoryAddress)
-		cmdLegacy := reader18.InventoryCommand(m.inventoryAddress, 0x00, 0x01)
+		antenna, nextIdx := nextInventoryAntenna(m.inventoryAntMask, m.inventoryAntIdx)
+		m.inventoryAntenna = antenna
+		m.inventoryAntIdx = nextIdx
+
+		cmdInventory := reader18.InventoryG2Command(
+			m.inventoryAddress,
+			m.inventoryQValue,
+			m.inventorySession,
+			0x00,
+			0x00,
+			m.inventoryTarget,
+			m.inventoryAntenna,
+			m.inventoryScanTime,
+		)
 		cmds = append(cmds,
-			sendNamedCmd(m.reader, "inventory-single", cmdSingle),
-			sendNamedCmd(m.reader, "inventory-legacy", cmdLegacy),
-			inventoryTickCmd(m.inventoryInterval),
+			sendNamedCmdSilent(m.reader, "inventory-g2", cmdInventory),
+			inventoryTickCmd(m.effectiveInventoryInterval()),
 		)
 		return m, tea.Batch(cmds...)
 
@@ -210,17 +221,26 @@ func (m Model) onConnectFinished(msg connectFinishedMsg) (tea.Model, tea.Cmd) {
 		m.inventoryRounds = 0
 		m.inventoryTagTotal = 0
 		m.inventoryFreqIdx = 0
+		m.inventoryNoTagHit = 0
+		m.inventoryAntIdx = 0
+		if m.inventoryAntMask == 0 {
+			m.inventoryAntMask = 0x01
+		}
 		m.lastTagEPC = ""
+		m.lastTagAntenna = 0
+		m.lastTagRSSI = 0
+		m.seenTagEPC = make(map[string]struct{})
 		m.inventoryAutoAddr = true
 		m.protocolBuffer = nil
 		m.status = "Connected. Preparing reader + reading started"
-		m.pushLog(fmt.Sprintf("reading started (interval %s)", m.inventoryInterval))
+		m.pushLog(fmt.Sprintf("reading started (poll=%s effective=%s scan=%d)", m.inventoryInterval, m.effectiveInventoryInterval(), m.inventoryScanTime))
 		base = append(base,
-			sendNamedCmd(m.reader, "cfg-work-mode", reader18.SetWorkModeCommand(m.inventoryAddress, []byte{0x00})),
-			sendNamedCmd(m.reader, "cfg-scan-time", reader18.SetScanTimeCommand(m.inventoryAddress, 0x03)),
-			sendNamedCmd(m.reader, "cfg-power", reader18.SetOutputPowerCommand(m.inventoryAddress, 0x21)),
-			sendNamedCmd(m.reader, "cfg-freq", reader18.SetFrequencyRangeCommand(m.inventoryAddress, 0x3E, 0x28)),
-			inventoryTickCmd(120*time.Millisecond),
+			sendNamedCmdSilent(m.reader, "cfg-work-mode", reader18.SetWorkModeCommand(m.inventoryAddress, []byte{0x00})),
+			sendNamedCmdSilent(m.reader, "cfg-scan-time", reader18.SetScanTimeCommand(m.inventoryAddress, m.inventoryScanTime)),
+			sendNamedCmdSilent(m.reader, "cfg-ant-mask", reader18.SetAntennaMuxCommand(m.inventoryAddress, m.inventoryAntMask)),
+			sendNamedCmdSilent(m.reader, "cfg-power", reader18.SetOutputPowerCommand(m.inventoryAddress, 0x21)),
+			sendNamedCmdSilent(m.reader, "cfg-freq", reader18.SetFrequencyRangeCommand(m.inventoryAddress, 0x3E, 0x28)),
+			inventoryTickCmd(m.effectiveInventoryInterval()),
 		)
 	case 2:
 		m.pendingAction = noPendingAction
@@ -257,8 +277,8 @@ func (m Model) onCommandSent(msg commandSentMsg) (tea.Model, tea.Cmd) {
 
 	m.txBytes += msg.Sent
 	if strings.HasPrefix(msg.Name, "inventory-") {
-		if m.inventoryRounds%8 == 0 {
-			m.status = fmt.Sprintf("Reading... rounds=%d tags=%d", m.inventoryRounds, m.inventoryTagTotal)
+		if m.activeScreen == screenControl && m.inventoryRounds%24 == 0 {
+			m.status = fmt.Sprintf("Reading... rounds=%d unique=%d", m.inventoryRounds, m.inventoryTagTotal)
 		}
 		return m, nil
 	}
@@ -295,46 +315,64 @@ func (m *Model) handleProtocolFrame(frame reader18.Frame) {
 			m.inventoryAutoAddr = false
 			m.pushLog(fmt.Sprintf("inventory address detected: 0x%02X", frame.Address))
 		}
+		tags, err := reader18.ParseInventoryG2Tags(frame)
+		if err != nil {
+			if !m.inventoryRunning {
+				m.pushLog("inventory parse error: " + err.Error())
+			}
+			return
+		}
+		if len(tags) > 0 {
+			if m.seenTagEPC == nil {
+				m.seenTagEPC = make(map[string]struct{})
+			}
+			m.inventoryNoTagHit = 0
+			newCount := 0
+			for _, tag := range tags {
+				epcText := strings.ReplaceAll(formatHex(tag.EPC, 96), " ", "")
+				if epcText == "" {
+					continue
+				}
+				m.lastTagEPC = epcText
+				m.lastTagAntenna = tag.Antenna
+				m.lastTagRSSI = tag.RSSI
+				if _, exists := m.seenTagEPC[epcText]; exists {
+					continue
+				}
+				m.seenTagEPC[epcText] = struct{}{}
+				m.inventoryTagTotal++
+				newCount++
+				m.pushLog(fmt.Sprintf("new tag ant=%d epc=%s rssi=%d total=%d", tag.Antenna, epcText, tag.RSSI, m.inventoryTagTotal))
+			}
+			if newCount > 0 {
+				if m.activeScreen == screenControl {
+					m.status = fmt.Sprintf("New tag(s): +%d total=%d", newCount, m.inventoryTagTotal)
+				}
+			} else if m.inventoryRunning && m.inventoryRounds%12 == 0 && m.lastTagEPC != "" {
+				if m.activeScreen == screenControl {
+					m.status = fmt.Sprintf("Tag seen again: %s", trimText(m.lastTagEPC, 28))
+				}
+			}
+			return
+		}
 
 		switch frame.Status {
-		case reader18.StatusSuccess:
-			count, err := reader18.InventoryTagCount(frame)
-			if err != nil {
-				m.pushLog("inventory parse error: " + err.Error())
-				return
-			}
-			m.inventoryTagTotal += count
-			if count > 0 {
-				m.status = fmt.Sprintf("Reading OK: last=%d total=%d", count, m.inventoryTagTotal)
-				m.pushLog(fmt.Sprintf("inventory: %d tag(s)", count))
-			} else if m.inventoryRunning && m.inventoryRounds%15 == 0 {
-				m.status = fmt.Sprintf("Reading... no tag (rounds=%d)", m.inventoryRounds)
-			}
-		case reader18.StatusNoTag:
-			count := 0
-			if len(frame.Data) >= 2 {
-				count = int(frame.Data[1])
-			} else if len(frame.Data) >= 1 {
-				count = int(frame.Data[0])
-			}
-			if count > 0 {
-				m.inventoryTagTotal += count
-				m.status = fmt.Sprintf("Reading OK: last=%d total=%d", count, m.inventoryTagTotal)
-				m.pushLog(fmt.Sprintf("inventory: %d tag(s)", count))
-			} else if m.inventoryRunning && m.inventoryRounds%15 == 0 {
-				m.status = fmt.Sprintf("Reading... no tag (rounds=%d)", m.inventoryRounds)
-			}
-		case reader18.StatusCmdError:
-			m.pushLog("inventory status: command error (0xFE)")
-		case reader18.StatusCRCError:
-			m.pushLog("inventory status: crc error (0xFF)")
-		case reader18.StatusNoTagOrTimeout:
-			if m.inventoryRunning && m.inventoryRounds%18 == 0 {
+		case reader18.StatusNoTag, 0x02, 0x03, 0x04, reader18.StatusNoTagOrTimeout:
+			m.onNoTagObserved()
+			if m.activeScreen == screenControl && m.inventoryRunning && m.inventoryRounds%24 == 0 {
 				m.status = fmt.Sprintf("Reading... no tag (rounds=%d)", m.inventoryRounds)
 			}
 		case reader18.StatusAntennaError:
 			if m.inventoryRunning && m.inventoryRounds%20 == 0 {
 				m.status = fmt.Sprintf("Reading... antenna check (rounds=%d)", m.inventoryRounds)
+			}
+		case reader18.StatusCmdError:
+			if !m.inventoryRunning {
+				m.pushLog("inventory status: illegal command (0xFE)")
+			}
+		case reader18.StatusCRCError:
+			if !m.inventoryRunning {
+				m.pushLog("inventory status: parameter error (0xFF)")
 			}
 		default:
 			if !m.inventoryRunning {
@@ -360,16 +398,33 @@ func (m *Model) handleProtocolFrame(frame reader18.Frame) {
 				return
 			}
 			if result.TagCount > 0 {
-				m.inventoryTagTotal += result.TagCount
 				epcText := strings.ReplaceAll(formatHex(result.EPC, 96), " ", "")
 				m.lastTagEPC = epcText
-				m.status = fmt.Sprintf("Tag detected: ant=%d epc=%s", result.Antenna, trimText(epcText, 28))
-				m.pushLog(fmt.Sprintf("tag ant=%d epc=%s", result.Antenna, epcText))
-			} else if m.inventoryRunning && m.inventoryRounds%14 == 0 {
-				m.status = fmt.Sprintf("Reading... no tag (rounds=%d)", m.inventoryRounds)
+				m.lastTagAntenna = int(result.Antenna)
+				m.lastTagRSSI = 0
+				m.inventoryNoTagHit = 0
+				if m.seenTagEPC == nil {
+					m.seenTagEPC = make(map[string]struct{})
+				}
+				if _, exists := m.seenTagEPC[epcText]; !exists {
+					m.seenTagEPC[epcText] = struct{}{}
+					m.inventoryTagTotal++
+					if m.activeScreen == screenControl {
+						m.status = fmt.Sprintf("New tag: ant=%d epc=%s", result.Antenna, trimText(epcText, 28))
+					}
+					m.pushLog(fmt.Sprintf("new tag ant=%d epc=%s total=%d", result.Antenna, epcText, m.inventoryTagTotal))
+				} else if m.activeScreen == screenControl && m.inventoryRunning && m.inventoryRounds%24 == 0 {
+					m.status = fmt.Sprintf("Tag seen again: %s", trimText(epcText, 28))
+				}
+			} else {
+				m.onNoTagObserved()
+				if m.activeScreen == screenControl && m.inventoryRunning && m.inventoryRounds%24 == 0 {
+					m.status = fmt.Sprintf("Reading... no tag (rounds=%d)", m.inventoryRounds)
+				}
 			}
 		case reader18.StatusNoTagOrTimeout:
-			if m.inventoryRunning && m.inventoryRounds%14 == 0 {
+			m.onNoTagObserved()
+			if m.activeScreen == screenControl && m.inventoryRunning && m.inventoryRounds%24 == 0 {
 				m.status = fmt.Sprintf("Reading... no tag (rounds=%d)", m.inventoryRounds)
 			}
 		case reader18.StatusAntennaError:
@@ -415,6 +470,14 @@ func (m Model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.activeScreen = screenHome
 		m.status = "Home"
 		return m, nil
+	case "0":
+		if m.activeScreen != screenHome {
+			m.activeScreen = screenHome
+			m.status = "Back to home"
+			return m, nil
+		}
+		m.status = "Home"
+		return m, nil
 	case "b", "backspace":
 		if m.activeScreen != screenHome {
 			m.activeScreen = screenHome
@@ -430,6 +493,8 @@ func (m Model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.updateDeviceKeys(msg)
 	case screenControl:
 		return m.updateControlKeys(msg)
+	case screenInventory:
+		return m.updateInventoryKeys(msg)
 	case screenRegions:
 		return m.updateRegionKeys(msg)
 	case screenLogs:
@@ -471,14 +536,17 @@ func (m Model) runHomeAction(index int) (tea.Model, tea.Cmd) {
 		m.activeScreen = screenControl
 		m.status = "Control"
 	case 3:
+		m.activeScreen = screenInventory
+		m.status = "Inventory Tune"
+	case 4:
 		m.activeScreen = screenRegions
 		m.regionCursor = m.regionIndex
 		m.status = "Regions"
-	case 4:
+	case 5:
 		m.activeScreen = screenLogs
 		m.logScroll = 0
 		m.status = "Logs"
-	case 5:
+	case 6:
 		m.activeScreen = screenHelp
 		m.status = "Help"
 	}
@@ -589,6 +657,175 @@ func (m Model) updateControlKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+const (
+	invTuneQValue = iota
+	invTuneSession
+	invTuneTarget
+	invTuneScanTime
+	invTuneNoTagAB
+	invTunePhaseFreq
+	invTuneAntennaMask
+	invTunePollInterval
+	invTuneApply
+	invTuneScanMask
+	invTunePresetFast
+	invTunePresetBalanced
+	invTunePresetLongRange
+	invTuneCount
+)
+
+func (m Model) updateInventoryKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "up", "k":
+		m.inventoryIndex = (m.inventoryIndex - 1 + invTuneCount) % invTuneCount
+		return m, nil
+	case "down", "j":
+		m.inventoryIndex = (m.inventoryIndex + 1) % invTuneCount
+		return m, nil
+	case "left", "h":
+		return m.adjustInventorySetting(-1)
+	case "right", "l":
+		return m.adjustInventorySetting(1)
+	case "enter":
+		return m.runInventoryAction()
+	}
+
+	if idx, ok := parseDigit(msg.String()); ok {
+		if idx < invTuneCount {
+			m.inventoryIndex = idx
+			if idx >= invTuneApply {
+				return m.runInventoryAction()
+			}
+			return m, nil
+		}
+	}
+
+	return m, nil
+}
+
+func (m Model) adjustInventorySetting(delta int) (tea.Model, tea.Cmd) {
+	switch m.inventoryIndex {
+	case invTuneQValue:
+		m.inventoryQValue = byte(clampInt(int(m.inventoryQValue)+delta, 0, 15))
+		m.status = fmt.Sprintf("Q value set to %d", m.inventoryQValue)
+	case invTuneSession:
+		m.inventorySession = byte(clampInt(int(m.inventorySession)+delta, 0, 3))
+		m.status = fmt.Sprintf("Session set to %d", m.inventorySession)
+	case invTuneTarget:
+		m.inventoryTarget ^= 0x01
+		m.status = "Target set to " + targetLabel(m.inventoryTarget)
+	case invTuneScanTime:
+		m.inventoryScanTime = byte(clampInt(int(m.inventoryScanTime)+delta, 1, 255))
+		m.status = fmt.Sprintf("Scan time set to %d (x100ms), effective cycle %s", m.inventoryScanTime, m.effectiveInventoryInterval())
+	case invTuneNoTagAB:
+		m.inventoryNoTagAB = clampInt(m.inventoryNoTagAB+delta, 0, 255)
+		m.status = fmt.Sprintf("No-tag A/B switch count set to %d", m.inventoryNoTagAB)
+	case invTunePhaseFreq:
+		m.showPhaseFreq = !m.showPhaseFreq
+		m.status = "Phase/freq columns " + strings.ToLower(onOff(m.showPhaseFreq))
+	case invTuneAntennaMask:
+		next := clampInt(int(m.inventoryAntMask)+delta, 1, 255)
+		m.inventoryAntMask = byte(next)
+		m.status = fmt.Sprintf("Antenna mask set to 0x%02X", m.inventoryAntMask)
+	case invTunePollInterval:
+		nextMS := clampInt(int(m.inventoryInterval/time.Millisecond)+delta*10, 20, 1000)
+		m.inventoryInterval = time.Duration(nextMS) * time.Millisecond
+		m.status = fmt.Sprintf("Poll interval set to %s, effective cycle %s", m.inventoryInterval, m.effectiveInventoryInterval())
+	default:
+		m.status = "Select a parameter row to edit"
+	}
+	return m, nil
+}
+
+func (m Model) runInventoryAction() (tea.Model, tea.Cmd) {
+	switch m.inventoryIndex {
+	case invTuneTarget, invTunePhaseFreq:
+		return m.adjustInventorySetting(1)
+
+	case invTuneApply:
+		if !m.reader.IsConnected() {
+			m.status = "Parameters saved locally (apply when connected)"
+			m.pushLog("inventory tune saved local")
+			return m, nil
+		}
+		m.status = "Applying inventory parameters..."
+		m.pushLog(fmt.Sprintf("apply tune q=%d s=%d t=%d scan=%d mask=0x%02X poll=%s effective=%s", m.inventoryQValue, m.inventorySession, m.inventoryTarget, m.inventoryScanTime, m.inventoryAntMask, m.inventoryInterval, m.effectiveInventoryInterval()))
+		return m, tea.Batch(
+			sendNamedCmdSilent(m.reader, "cfg-scan-time", reader18.SetScanTimeCommand(m.inventoryAddress, m.inventoryScanTime)),
+			sendNamedCmdSilent(m.reader, "cfg-ant-mask", reader18.SetAntennaMuxCommand(m.inventoryAddress, m.inventoryAntMask)),
+		)
+
+	case invTuneScanMask:
+		if m.inventoryAntMask == 0 {
+			m.inventoryAntMask = 0x01
+		}
+		m.inventoryAntIdx = 0
+		if m.reader.IsConnected() {
+			m.status = fmt.Sprintf("Antenna scan configured: mask=0x%02X", m.inventoryAntMask)
+			m.pushLog(fmt.Sprintf("antenna scan mask set: 0x%02X", m.inventoryAntMask))
+			return m, sendNamedCmdSilent(m.reader, "cfg-ant-mask", reader18.SetAntennaMuxCommand(m.inventoryAddress, m.inventoryAntMask))
+		}
+		m.status = fmt.Sprintf("Antenna scan mask saved: 0x%02X", m.inventoryAntMask)
+		return m, nil
+
+	case invTunePresetFast:
+		m = m.applyInventoryPreset("fast")
+		return m, nil
+	case invTunePresetBalanced:
+		m = m.applyInventoryPreset("balanced")
+		return m, nil
+	case invTunePresetLongRange:
+		m = m.applyInventoryPreset("long-range")
+		return m, nil
+	}
+
+	return m.adjustInventorySetting(1)
+}
+
+func (m Model) applyInventoryPreset(name string) Model {
+	switch name {
+	case "fast":
+		m.inventoryQValue = 4
+		m.inventorySession = 1
+		m.inventoryTarget = 0
+		m.inventoryScanTime = 1
+		m.inventoryNoTagAB = 4
+		m.inventoryInterval = 40 * time.Millisecond
+		m.inventoryAntMask = 0x01
+		m.status = "Preset applied: fast"
+	case "balanced":
+		m.inventoryQValue = 4
+		m.inventorySession = 1
+		m.inventoryTarget = 0
+		m.inventoryScanTime = 2
+		m.inventoryNoTagAB = 4
+		m.inventoryInterval = 70 * time.Millisecond
+		m.inventoryAntMask = 0x01
+		m.status = "Preset applied: balanced"
+	case "long-range":
+		m.inventoryQValue = 4
+		m.inventorySession = 2
+		m.inventoryTarget = 0
+		m.inventoryScanTime = 8
+		m.inventoryNoTagAB = 5
+		m.inventoryInterval = 120 * time.Millisecond
+		m.inventoryAntMask = 0x01
+		m.status = "Preset applied: long-range"
+	}
+	m.pushLog(fmt.Sprintf("preset %s: q=%d s=%d target=%d scan=%d poll=%s effective=%s mask=0x%02X", name, m.inventoryQValue, m.inventorySession, m.inventoryTarget, m.inventoryScanTime, m.inventoryInterval, m.effectiveInventoryInterval(), m.inventoryAntMask))
+	return m
+}
+
+func clampInt(value, minValue, maxValue int) int {
+	if value < minValue {
+		return minValue
+	}
+	if value > maxValue {
+		return maxValue
+	}
+	return value
+}
+
 func (m Model) runControlAction(index int) (tea.Model, tea.Cmd) {
 	switch index {
 	case 0:
@@ -603,17 +840,26 @@ func (m Model) runControlAction(index int) (tea.Model, tea.Cmd) {
 		m.inventoryRounds = 0
 		m.inventoryTagTotal = 0
 		m.inventoryFreqIdx = 0
+		m.inventoryNoTagHit = 0
+		m.inventoryAntIdx = 0
+		if m.inventoryAntMask == 0 {
+			m.inventoryAntMask = 0x01
+		}
 		m.lastTagEPC = ""
+		m.lastTagAntenna = 0
+		m.lastTagRSSI = 0
+		m.seenTagEPC = make(map[string]struct{})
 		m.inventoryAutoAddr = true
 		m.protocolBuffer = nil
 		m.status = "Preparing reader + reading started"
-		m.pushLog(fmt.Sprintf("reading started (interval %s)", m.inventoryInterval))
+		m.pushLog(fmt.Sprintf("reading started (poll=%s effective=%s scan=%d)", m.inventoryInterval, m.effectiveInventoryInterval(), m.inventoryScanTime))
 		return m, tea.Batch(
-			sendNamedCmd(m.reader, "cfg-work-mode", reader18.SetWorkModeCommand(m.inventoryAddress, []byte{0x00})),
-			sendNamedCmd(m.reader, "cfg-scan-time", reader18.SetScanTimeCommand(m.inventoryAddress, 0x03)),
-			sendNamedCmd(m.reader, "cfg-power", reader18.SetOutputPowerCommand(m.inventoryAddress, 0x21)),
-			sendNamedCmd(m.reader, "cfg-freq", reader18.SetFrequencyRangeCommand(m.inventoryAddress, 0x3E, 0x28)),
-			inventoryTickCmd(120*time.Millisecond),
+			sendNamedCmdSilent(m.reader, "cfg-work-mode", reader18.SetWorkModeCommand(m.inventoryAddress, []byte{0x00})),
+			sendNamedCmdSilent(m.reader, "cfg-scan-time", reader18.SetScanTimeCommand(m.inventoryAddress, m.inventoryScanTime)),
+			sendNamedCmdSilent(m.reader, "cfg-ant-mask", reader18.SetAntennaMuxCommand(m.inventoryAddress, m.inventoryAntMask)),
+			sendNamedCmdSilent(m.reader, "cfg-power", reader18.SetOutputPowerCommand(m.inventoryAddress, 0x21)),
+			sendNamedCmdSilent(m.reader, "cfg-freq", reader18.SetFrequencyRangeCommand(m.inventoryAddress, 0x3E, 0x28)),
+			inventoryTickCmd(m.effectiveInventoryInterval()),
 		)
 
 	case 1:
@@ -666,6 +912,11 @@ func (m Model) runControlAction(index int) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case 7:
+		m.activeScreen = screenInventory
+		m.status = "Inventory Tune"
+		return m, nil
+
+	case 8:
 		m.activeScreen = screenHome
 		m.status = "Home"
 		return m, nil
@@ -814,6 +1065,36 @@ func (m Model) requestConnectionForAction(action int, actionName string) (tea.Mo
 	m.status = fmt.Sprintf("%s requested: scanning for reader...", actionName)
 	m.pushLog("pending action triggered scan")
 	return m, runScanCmd(m.scanOptions)
+}
+
+func (m *Model) onNoTagObserved() {
+	if !m.inventoryRunning {
+		return
+	}
+	m.inventoryNoTagHit++
+	if m.inventorySession <= 1 || m.inventoryNoTagAB <= 0 {
+		return
+	}
+	if m.inventoryNoTagHit >= m.inventoryNoTagAB {
+		m.inventoryTarget ^= 0x01
+		m.inventoryNoTagHit = 0
+		m.pushLog("no-tag threshold reached, target switched to " + targetLabel(m.inventoryTarget))
+	}
+}
+
+func nextInventoryAntenna(mask byte, start int) (byte, int) {
+	if mask == 0 {
+		mask = 0x01
+	}
+	start = ((start % 8) + 8) % 8
+
+	for i := 0; i < 8; i++ {
+		idx := (start + i) % 8
+		if mask&(byte(1)<<idx) != 0 {
+			return byte(0x80 | idx), (idx + 1) % 8
+		}
+	}
+	return 0x80, start
 }
 
 func preferredVerifiedCandidateIndex(candidates []discovery.Candidate) int {
